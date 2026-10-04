@@ -100,7 +100,7 @@ jobs:
       - run: terraform fmt -check -recursive -diff
       - run: terraform init -backend=false -input=false
       - run: terraform validate -no-color
-      - uses: terraform-linters/setup-tflint@v4
+      - uses: terraform-linters/setup-tflint@v6
       - run: tflint --init
         env:
           GITHUB_TOKEN: ${{ github.token }}
