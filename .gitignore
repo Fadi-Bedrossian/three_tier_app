@@ -1,0 +1,25 @@
+# Node
+node_modules/
+coverage/
+dist/
+*.log
+.env
+.env.*
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+.terraform.lock.hcl.bak
+
+# Rendered manifests / scan output
+rendered/
+*.sarif
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,22 @@
+# Checkov config used by CI. Each skip is a deliberate, documented trade-off.
+compact: true
+skip-check:
+  # ACR public network access: GitHub-hosted runners must reach it. Use Premium + private endpoint + self-hosted runners to remove.
+  - CKV_AZURE_139
+  # ACR geo-replication / quarantine / content trust: images are signed with cosign instead.
+  - CKV_AZURE_165
+  - CKV_AZURE_166
+  - CKV_AZURE_164
+  # Key Vault public network access: AKS CSI driver and CI reach it over Entra-authenticated HTTPS.
+  - CKV_AZURE_189
+  - CKV_AZURE_109
+  # Key Vault secrets expiration: DB credentials are rotated by re-applying Terraform.
+  - CKV_AZURE_41
+  # AKS: private cluster not used so GitHub-hosted runners can deploy (restrict with api_server_authorized_ip_ranges).
+  - CKV_AZURE_115
+  - CKV_AZURE_6
+  # AKS disk encryption set (CMK) - optional, platform-managed keys used.
+  - CKV_AZURE_117
+  # K8s: image tags are rewritten to immutable commit SHAs at deploy time.
+  - CKV_K8S_14
+  - CKV_K8S_43

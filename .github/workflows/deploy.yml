@@ -1,0 +1,148 @@
+# Continuous delivery to AKS with Kustomize.
+# Triggered when CI succeeds on main: verifies the signed images, promotes them from GHCR into ACR,
+# renders the overlay with Terraform outputs, applies it, and waits for a healthy rollout.
+# dev deploys automatically; prod waits for approval on the "prod" GitHub environment.
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag (full commit SHA) to deploy; defaults to the current commit"
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+  packages: read
+
+concurrency:
+  group: deploy-${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  GHCR_PREFIX: ghcr.io/${{ github.repository }}
+
+jobs:
+  deploy:
+    name: Deploy · ${{ matrix.env }}
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1       # dev first, then prod
+      fail-fast: true
+      matrix:
+        env: [dev, prod]
+    environment:
+      name: ${{ matrix.env }}
+      url: https://${{ vars.APP_HOST }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Resolve image tag
+        id: tag
+        run: echo "tag=${{ inputs.image_tag || github.event.workflow_run.head_sha || github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - uses: sigstore/cosign-installer@v3
+      - name: Verify image signatures (keyless, issued to this repo's CI workflow)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
+          for svc in api frontend; do
+            cosign verify "$GHCR_PREFIX/$svc:${{ steps.tag.outputs.tag }}" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.github/workflows/ci.yml@" \
+              > /dev/null
+          done
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.9"
+          terraform_wrapper: false
+      - uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: v0.1.6
+      - uses: azure/setup-kubectl@v4
+
+      - name: Read Terraform outputs
+        id: tf
+        working-directory: infra/terraform
+        run: |
+          terraform init -input=false -backend-config=environments/${{ matrix.env }}.backend.hcl > /dev/null
+          terraform output -json > /tmp/tf.json
+          for k in resource_group_name aks_cluster_name acr_name acr_login_server key_vault_name tenant_id workload_identity_client_id k8s_namespace; do
+            echo "$k=$(jq -r ".$k.value" /tmp/tf.json)" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Promote images GHCR -> ACR
+        run: |
+          for svc in api frontend; do
+            az acr import --force \
+              --name "${{ steps.tf.outputs.acr_name }}" \
+              --source "$GHCR_PREFIX/$svc:${{ steps.tag.outputs.tag }}" \
+              --image "three-tier/$svc:${{ steps.tag.outputs.tag }}" \
+              --username "${{ github.actor }}" --password "${{ secrets.GITHUB_TOKEN }}"
+          done
+
+      - name: Render overlay
+        working-directory: k8s/overlays/${{ matrix.env }}
+        run: |
+          curl -sSfL https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.5.0/kustomize_v5.5.0_linux_amd64.tar.gz | tar xz -C /usr/local/bin
+          cat > params.env <<EOF
+          KEYVAULT_NAME=${{ steps.tf.outputs.key_vault_name }}
+          TENANT_ID=${{ steps.tf.outputs.tenant_id }}
+          WORKLOAD_CLIENT_ID=${{ steps.tf.outputs.workload_identity_client_id }}
+          APP_HOST=${{ vars.APP_HOST }}
+          EOF
+          kustomize edit set image \
+            api=${{ steps.tf.outputs.acr_login_server }}/three-tier/api:${{ steps.tag.outputs.tag }} \
+            frontend=${{ steps.tf.outputs.acr_login_server }}/three-tier/frontend:${{ steps.tag.outputs.tag }}
+          kustomize build . > /tmp/manifests.yaml
+          echo "Rendered $(grep -c '^kind:' /tmp/manifests.yaml) objects"
+
+      - name: Connect to AKS
+        run: |
+          az aks get-credentials -g "${{ steps.tf.outputs.resource_group_name }}" -n "${{ steps.tf.outputs.aks_cluster_name }}" --overwrite-existing
+          kubelogin convert-kubeconfig -l azurecli
+
+      - name: Server-side dry run (admission + policy checks)
+        run: kubectl apply --server-side --dry-run=server -f /tmp/manifests.yaml
+
+      - name: Apply
+        run: kubectl apply --server-side --force-conflicts -f /tmp/manifests.yaml
+
+      - name: Wait for rollout
+        env:
+          NS: ${{ steps.tf.outputs.k8s_namespace }}
+        run: |
+          kubectl -n "$NS" rollout status deploy/api --timeout=5m
+          kubectl -n "$NS" rollout status deploy/frontend --timeout=5m
+
+      - name: In-cluster smoke test
+        env:
+          NS: ${{ steps.tf.outputs.k8s_namespace }}
+        run: |
+          kubectl -n "$NS" exec deploy/api -c api -- wget -qO- http://127.0.0.1:3000/readyz
+          kubectl -n "$NS" exec deploy/frontend -- wget -qO- http://127.0.0.1:8080/api/items > /dev/null
+
+      - name: Roll back on failure
+        if: failure()
+        env:
+          NS: ${{ steps.tf.outputs.k8s_namespace }}
+        run: |
+          kubectl -n "$NS" rollout undo deploy/api || true
+          kubectl -n "$NS" rollout undo deploy/frontend || true
