@@ -77,3 +77,22 @@ spec:
     # Entra ID / Key Vault (HTTPS) for workload identity token exchange.
     - ports:
         - { protocol: TCP, port: 443 }
+---
+# cert-manager creates a temporary HTTP-01 solver pod in this namespace while issuing the TLS
+# certificate; Let's Encrypt reaches it through ingress-nginx.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-acme-solver
+spec:
+  podSelector:
+    matchLabels:
+      acme.cert-manager.io/http01-solver: "true"
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - { protocol: TCP, port: 8089 }
