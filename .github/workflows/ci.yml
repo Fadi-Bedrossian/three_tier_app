@@ -220,7 +220,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build (local, for scanning)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.service }}
           load: true
@@ -261,7 +261,7 @@ jobs:
       - name: Build multi-arch and push (with SBOM + provenance)
         id: push
         if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.service }}
           platforms: linux/amd64,linux/arm64
