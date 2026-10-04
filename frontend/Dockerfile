@@ -9,7 +9,7 @@ COPY . .
 RUN npm run build
 
 # ---- serve with unprivileged nginx ----
-FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime
+FROM nginxinc/nginx-unprivileged:1.31-alpine AS runtime
 # API_UPSTREAM is substituted into the template at container start (envsubst, built into the image).
 ENV API_UPSTREAM=api:3000
 COPY nginx.conf /etc/nginx/templates/default.conf.template
