@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # ---- deps: production dependencies only ----
-FROM node:22-alpine AS deps
+FROM node:25-alpine AS deps
 WORKDIR /app
 COPY package*.json ./
 # npm ci when a lockfile is committed (recommended); falls back to npm install otherwise.
@@ -10,7 +10,7 @@ RUN if [ -f package-lock.json ]; then npm ci --omit=dev --ignore-scripts; \
  && npm cache clean --force
 
 # ---- runtime: small, non-root ----
-FROM node:22-alpine AS runtime
+FROM node:25-alpine AS runtime
 ENV NODE_ENV=production \
     PORT=3000
 WORKDIR /app
